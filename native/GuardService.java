@@ -12,7 +12,7 @@ import android.os.Build;
 import android.os.IBinder;
 
 /**
- * Service au premier plan : une notification permanente indique a Android
+ * Service au premier plan : la notification permanente indique a Android
  * (et a HiOS / XOS / ItelOS) que l'appli travaille, ce qui la rend beaucoup
  * plus difficile a tuer en arriere-plan.
  */
@@ -22,7 +22,10 @@ public class GuardService extends Service {
     public static final int NOTIF_ID = 4201;
     public static final String PREFS = "antikill";
     public static final String KEY_ENABLED = "guard_enabled";
+    public static final String KEY_ERROR = "last_error";
     private static final long HEARTBEAT_MS = 15 * 60 * 1000L;
+    // FOREGROUND_SERVICE_TYPE_SPECIAL_USE (Android 14+)
+    private static final int TYPE_SPECIAL_USE = 0x40000000;
 
     public static void start(Context c) {
         Intent i = new Intent(c, GuardService.class);
@@ -41,6 +44,14 @@ public class GuardService extends Service {
         c.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_ENABLED, value).apply();
     }
 
+    public static String getLastError(Context c) {
+        return c.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_ERROR, "");
+    }
+
+    public static void setLastError(Context c, String err) {
+        c.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY_ERROR, err == null ? "" : err).apply();
+    }
+
     @Override
     public IBinder onBind(Intent intent) {
         return null;
@@ -48,8 +59,21 @@ public class GuardService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        createChannel();
-        startForeground(NOTIF_ID, buildNotification());
+        try {
+            createChannel();
+            Notification n = buildNotification();
+            if (Build.VERSION.SDK_INT >= 34 && FgsConfig.USE_TYPE) {
+                startForeground(NOTIF_ID, n, TYPE_SPECIAL_USE);
+            } else {
+                startForeground(NOTIF_ID, n);
+            }
+            setLastError(this, "");
+        } catch (Exception e) {
+            setLastError(this, String.valueOf(e));
+            setEnabled(this, false);
+            stopSelf();
+            return START_NOT_STICKY;
+        }
         scheduleRestart(this, HEARTBEAT_MS);
         return START_STICKY;
     }
@@ -120,7 +144,7 @@ public class GuardService extends Service {
                 am.set(AlarmManager.RTC_WAKEUP, t, pi);
             }
         } catch (Exception ignored) {
-            // Best effort : on ne plante jamais pour ca
+            // Best effort
         }
     }
 }

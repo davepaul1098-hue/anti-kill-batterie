@@ -1,171 +1,340 @@
-(function () {
+(() => {
   'use strict';
 
-  var BG = (window.Capacitor && typeof window.Capacitor.registerPlugin === 'function')
-    ? window.Capacitor.registerPlugin('BatteryGuard') : null;
+  // ---------- Journal de diagnostic ----------
+  const LOG = [];
+  const log = (m) => { LOG.push(new Date().toLocaleTimeString() + ' ' + m); if (LOG.length > 60) LOG.shift(); };
+  window.addEventListener('error', (e) => log('JS : ' + e.message));
+  window.addEventListener('unhandledrejection', (e) => log('Promesse : ' + (e.reason && e.reason.message ? e.reason.message : e.reason)));
 
-  var STORE = 'antikill_steps_v1';
-  var done = {};
-  var guardOn = false;
+  const LS = {
+    get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } },
+    set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
+  };
 
-  function $(id) { return document.getElementById(id); }
+  // ---------- État ----------
+  const root = document.getElementById('root');
+  const toastEl = document.getElementById('toast');
+  let info = {};
+  let lastKey = '';
+  let confirmed = LS.get('ak_confirmed', {});
+  let onboarded = LS.get('ak_onboarded', false);
+  let obStep = 0;
+  let waiting = -1;
+  let bridgeOk = false;
+  let toastTimer = null;
 
-  function el(tag, cls, txt) {
-    var e = document.createElement(tag);
-    if (cls) e.className = cls;
-    if (txt) e.textContent = txt;
+  function saveConfirmed() { LS.set('ak_confirmed', confirmed); }
+
+  function toast(msg) {
+    toastEl.textContent = msg;
+    toastEl.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toastEl.classList.remove('show'), 4200);
+  }
+
+  function h(tag, props, ...kids) {
+    const e = document.createElement(tag);
+    if (props) {
+      for (const k in props) {
+        if (k === 'class') e.className = props[k];
+        else if (k === 'onclick') e.onclick = props[k];
+        else if (k === 'html') e.innerHTML = props[k];
+        else e.setAttribute(k, props[k]);
+      }
+    }
+    kids.flat().forEach((c) => {
+      if (c === null || c === undefined || c === false) return;
+      e.appendChild(typeof c === 'string' ? document.createTextNode(c) : c);
+    });
     return e;
   }
 
-  try { done = JSON.parse(localStorage.getItem(STORE) || '{}'); } catch (e) { done = {}; }
-  function save() { try { localStorage.setItem(STORE, JSON.stringify(done)); } catch (e) {} }
+  // ---------- Pont natif ----------
+  const nativeObj = () => window.AndroidNative || null;
 
-  function call(method) {
-    if (!BG) return Promise.reject(new Error('web'));
-    return BG[method]();
+  function nat(method, arg) {
+    const n = nativeObj();
+    if (!n || typeof n[method] !== 'function') { log('Pont absent : ' + method); return null; }
+    try {
+      const raw = (arg === undefined) ? n[method]() : n[method](arg);
+      const o = raw ? JSON.parse(raw) : {};
+      if (o && o.error) log(method + ' -> ' + o.error);
+      return o;
+    } catch (e) {
+      log('Erreur ' + method + ' : ' + e.message);
+      return { error: e.message };
+    }
   }
 
-  function levelMsg(r) {
+  // ---------- Actions ----------
+  function openMsg(r) {
     if (!r || !r.opened) {
-      return 'Impossible d’ouvrir cet écran. Va dans Paramètres → Applications → Anti-Kill Batterie.';
-    }
-    if (r.level === 'direct') {
-      return 'Écran ouvert ✅ Active l’option pour cette appli puis reviens ici.';
-    }
-    if (r.level === 'app') {
-      return 'Ouvert : ' + r.opened + '. Cherche « Démarrage auto » ou « Gestion des applis » et ajoute cette appli.';
-    }
-    return 'Réglages ouverts. Cherche « Batterie » ou « Démarrage auto » et choisis « Aucune restriction ».';
-  }
-
-  var STEPS = [
-    {
-      id: 'exempt', icon: '⚡', title: 'Exemption batterie',
-      text: 'Autorise l’appli à ignorer l’optimisation de batterie d’Android.',
-      method: 'requestIgnoreBattery', btn: 'Ouvrir la demande'
-    },
-    {
-      id: 'auto', icon: '🚀', title: 'Démarrage automatique',
-      text: 'Active le démarrage auto pour l’appli (Phone Master / Applis protégées).',
-      method: 'openAutoStart', btn: 'Ouvrir le réglage'
-    },
-    {
-      id: 'battery', icon: '🔋', title: 'Batterie : aucune restriction',
-      text: 'Dans les réglages de batterie de l’appli, choisis « Aucune restriction ».',
-      method: 'openBatterySettings', btn: 'Ouvrir la batterie'
-    },
-    {
-      id: 'lock', icon: '🔒', title: 'Verrouiller dans les Récents',
-      text: 'Ouvre l’appli, touche le bouton Récents, puis appuie sur l’icône (ou ⋮) de la carte et choisis « Verrouiller ». C’est souvent le réglage décisif sur Tecno / Infinix / Itel.',
-      method: null, btn: null
-    },
-    {
-      id: 'clean', icon: '🧹', title: 'Désactiver le nettoyage auto',
-      text: 'Dans Phone Master / Gestionnaire de téléphone, désactive le nettoyage automatique et le gel des applis en arrière-plan.',
-      method: 'openBatterySettings', btn: 'Ouvrir Phone Master'
-    }
-  ];
-
-  function renderSteps() {
-    var ol = $('steps');
-    ol.innerHTML = '';
-    var n = 0;
-
-    STEPS.forEach(function (s, idx) {
-      var isDone = !!done[s.id];
-      if (isDone) n++;
-
-      var li = el('li', 'step' + (isDone ? ' done' : ''));
-      li.appendChild(el('h3', '', s.icon + ' ' + (idx + 1) + '. ' + s.title));
-      li.appendChild(el('p', '', s.text));
-      var msg = el('p', 'stepmsg', '');
-      li.appendChild(msg);
-
-      var actions = el('div', 'actions');
-
-      if (s.method) {
-        var b = el('button', 'btn small primary', s.btn);
-        b.addEventListener('click', function () {
-          call(s.method)
-            .then(function (r) { msg.textContent = levelMsg(r); })
-            .catch(function () { msg.textContent = 'Disponible seulement dans l’APK installé.'; });
-        });
-        actions.appendChild(b);
-      }
-
-      var d = el('button', 'btn small', isDone ? 'Annuler ↩' : 'Fait ✓');
-      d.addEventListener('click', function () {
-        done[s.id] = !done[s.id];
-        save();
-        renderSteps();
-      });
-      actions.appendChild(d);
-
-      li.appendChild(actions);
-      ol.appendChild(li);
-    });
-
-    $('barFill').style.width = Math.round(n * 100 / STEPS.length) + '%';
-    $('progress').textContent = n + ' / ' + STEPS.length + ' étapes faites';
-  }
-
-  function setPill(id, ok, yes, no) {
-    var p = $(id);
-    p.textContent = ok ? yes : no;
-    p.className = 'pill ' + (ok ? 'ok' : 'ko');
-  }
-
-  function refresh() {
-    if (!BG) {
-      $('deviceName').textContent = 'Aperçu navigateur';
-      $('androidVer').textContent = '—';
-      $('hint').textContent = 'Installe l’APK pour utiliser les fonctions Android.';
+      toast('Impossible d’ouvrir cet écran. Va dans Paramètres → Applications → Anti-Kill Batterie.');
       return;
     }
-    call('getInfo').then(function (i) {
-      $('deviceName').textContent = (i.brand || i.manufacturer || '') + ' ' + (i.model || '');
-      $('androidVer').textContent = 'Android ' + i.release + ' (API ' + i.sdk + ')';
-      setPill('pillBattery', i.ignoringBattery, 'Exemptée ✅', 'Non exemptée ❌');
-      setPill('pillGuard', i.guardRunning, 'Active ✅', 'Inactive ❌');
-
-      guardOn = !!i.guardRunning;
-      var bg = $('btnGuard');
-      bg.textContent = guardOn ? 'Désactiver la protection' : 'Activer la protection';
-      bg.className = 'btn ' + (guardOn ? 'danger' : 'primary');
-
-      var hint = i.transsion
-        ? 'Téléphone Tecno / Infinix / Itel détecté.'
-        : 'Marque non Transsion : les réglages peuvent avoir d’autres noms.';
-      if (i.phoneMaster) hint += ' Phone Master détecté.';
-      $('hint').textContent = hint;
-    }).catch(function () {});
+    if (r.level === 'dialog') return;
+    if (r.level === 'direct') toast('Écran ouvert ✅ Active l’option pour cette appli, puis reviens ici.');
+    else if (r.level === 'app') toast('Ouvert : ' + r.opened + '. Cherche « Démarrage auto » ou « Gestion des applis ».');
+    else toast('Réglages ouverts : cherche « Batterie » ou « Démarrage auto », puis « Aucune restriction ».');
   }
 
-  $('btnGuard').addEventListener('click', function () {
-    var gm = $('guardMsg');
-    var method = guardOn ? 'stopGuard' : 'startGuard';
-    call(method).then(function (r) {
-      if (method === 'startGuard') {
-        gm.textContent = r.notifications
-          ? 'Protection lancée ✅ Tu dois voir la notification permanente.'
-          : 'Protection lancée, mais les notifications sont refusées : autorise-les dans les réglages de l’appli pour plus de fiabilité.';
+  function fixNotif() {
+    const asked = LS.get('ak_notif_asked', false);
+    if (info.sdk >= 33 && !asked) {
+      LS.set('ak_notif_asked', true);
+      nat('requestNotifications');
+      return;
+    }
+    openMsg(nat('openNotificationSettings'));
+  }
+
+  function fixBattery() { openMsg(nat('requestIgnoreBattery')); }
+
+  function toggleGuard() {
+    if (info.guardRunning) {
+      nat('stopGuard');
+    } else {
+      if (!info.notifications) toast('Autorise aussi les notifications pour que la protection soit visible et fiable.');
+      nat('startGuard');
+    }
+    setTimeout(() => refresh(true), 900);
+  }
+
+  function sheet(title, body, buttons) {
+    const bd = h('div', { class: 'backdrop' });
+    const close = () => bd.remove();
+    bd.onclick = (e) => { if (e.target === bd) close(); };
+    const acts = buttons.map((b) => h('button', {
+      class: 'btn ' + (b.cls || ''),
+      onclick: () => { close(); if (b.run) b.run(); }
+    }, b.label));
+    bd.appendChild(h('div', { class: 'sheet' }, h('h2', null, title), body, acts));
+    document.body.appendChild(bd);
+  }
+
+  function lockSteps() {
+    return h('ol', { class: 'lock-steps' },
+      h('li', null, 'Ouvre l’appli à protéger.'),
+      h('li', null, 'Touche le bouton Récents (▢ ou balayage depuis le bas).'),
+      h('li', null, 'Appuie sur l’icône de l’appli en haut de sa carte (ou sur ⋮).'),
+      h('li', null, 'Choisis « Verrouiller » 🔒. Un cadenas apparaît sur la carte.')
+    );
+  }
+
+  function lockVisual() {
+    return h('div', { style: 'width:100%' },
+      h('div', { class: 'mock' },
+        h('div', { class: 'mock-card' }, h('span', null, '📱'), h('span', { class: 'grow' }, 'Mon appli'), h('span', { class: 'lockbadge' }, '🔒 Verrouillée'))
+      ),
+      lockSteps()
+    );
+  }
+
+  function showLockSheet() {
+    sheet('🔒 Verrouiller dans les Récents',
+      h('div', null, h('p', { class: 'sub' }, 'C’est souvent le réglage décisif sur Tecno, Infinix et Itel.'), lockSteps()),
+      [
+        { label: 'C’est verrouillé ✓', cls: 'primary', run: () => { confirmed.lock = true; saveConfirmed(); refresh(true); } },
+        { label: 'Fermer', cls: 'ghost' }
+      ]
+    );
+  }
+
+  // ---------- Onboarding ----------
+  const OB = [
+    { kind: 'welcome', icon: '🔋', title: 'Bienvenue',
+      text: 'Ton téléphone ferme tes applis trop vite pour économiser la batterie. Anti-Kill Batterie t’aide à l’en empêcher, en quelques réglages rapides.' },
+    { kind: 'perm', icon: '🔔', title: 'Notifications',
+      text: 'Une petite notification permanente prouve à Android que l’appli travaille : c’est ce qui la protège le mieux.',
+      btn: 'Autoriser les notifications', run: fixNotif, check: () => !!info.notifications },
+    { kind: 'perm', icon: '⚡', title: 'Exemption batterie',
+      text: 'Autorise l’appli à ignorer l’optimisation de batterie. Une fenêtre Android va s’ouvrir : appuie sur « Autoriser ».',
+      btn: 'Autoriser', run: fixBattery, check: () => !!info.ignoringBattery },
+    { kind: 'manual', icon: '🚀', title: 'Démarrage automatique', key: 'auto',
+      text: 'Active le démarrage auto pour l’appli (Phone Master / Applis protégées), puis reviens ici.',
+      btn: 'Ouvrir le réglage', run: () => openMsg(nat('openAutoStart')), confirmLabel: 'C’est activé ✓' },
+    { kind: 'manual', icon: '🔒', title: 'Verrouiller dans les Récents', key: 'lock', lock: true,
+      text: 'Le réglage le plus efficace sur Tecno, Infinix et Itel.', btn: null, confirmLabel: 'C’est verrouillé ✓' },
+    { kind: 'final', icon: '✅', title: 'Tout est prêt',
+      text: 'La protection démarre. Tu pourras tout revoir dans le tableau de bord.' }
+  ];
+
+  function goNext() {
+    obStep = Math.min(obStep + 1, OB.length - 1);
+    waiting = -1;
+    if (OB[obStep].kind === 'final') {
+      nat('startGuard');
+      setTimeout(() => refresh(true), 900);
+    }
+    refresh(true);
+  }
+
+  function finish() {
+    onboarded = true;
+    LS.set('ak_onboarded', true);
+    refresh(true);
+  }
+
+  function onboarding() {
+    const s = OB[obStep];
+    const done = s.check ? !!s.check() : false;
+    const dots = h('div', { class: 'dots' }, OB.map((_, i) => h('i', { class: i === obStep ? 'on' : '' })));
+    const actions = h('div', { class: 'actions' });
+    const add = (label, cls, fn) => actions.appendChild(h('button', { class: 'btn ' + cls, onclick: fn }, label));
+
+    if (s.kind === 'welcome') {
+      add('Commencer', 'primary', goNext);
+    } else if (s.kind === 'perm') {
+      if (done) {
+        add('Continuer', 'primary', goNext);
       } else {
-        gm.textContent = 'Protection arrêtée.';
+        add(s.btn, 'primary', () => { waiting = obStep; s.run(); setTimeout(() => refresh(true), 900); });
+        add('Passer', 'ghost', goNext);
       }
-      setTimeout(refresh, 600);
-    }).catch(function (e) {
-      gm.textContent = (e && e.message === 'web')
-        ? 'Disponible seulement dans l’APK installé.'
-        : 'Erreur : ' + (e && e.message ? e.message : 'inconnue');
-    });
-  });
+    } else if (s.kind === 'manual') {
+      if (s.run) add(s.btn, 'primary', () => s.run());
+      add(s.confirmLabel, s.run ? '' : 'primary', () => { confirmed[s.key] = true; saveConfirmed(); goNext(); });
+      add('Plus tard', 'ghost', goNext);
+    } else {
+      add('Terminer', 'primary', finish);
+    }
 
-  document.addEventListener('visibilitychange', function () {
-    if (!document.hidden) refresh();
-  });
-  window.addEventListener('focus', refresh);
-  setInterval(refresh, 5000);
+    return h('div', { class: 'ob' },
+      dots,
+      h('div', { class: 'ob-icon' }, s.icon),
+      h('h1', null, s.title),
+      h('p', null, s.text),
+      s.lock ? lockVisual() : null,
+      done ? h('div', { class: 'badge' }, '✅ Déjà fait') : null,
+      h('div', { class: 'spacer' }),
+      actions
+    );
+  }
 
-  renderSteps();
-  refresh();
+  // ---------- Tableau de bord ----------
+  function buildItems() {
+    return [
+      { key: 'notif', label: 'Notifications autorisées', hint: 'Nécessaire pour la notification de protection', pts: 15, ok: !!info.notifications, run: fixNotif, btn: 'Autoriser' },
+      { key: 'battery', label: 'Exemption batterie', hint: 'Android n’optimise plus cette appli', pts: 30, ok: !!info.ignoringBattery, run: fixBattery, btn: 'Autoriser' },
+      { key: 'guard', label: 'Protection active', hint: info.lastError ? 'Erreur : ' + info.lastError : 'Service au premier plan', pts: 30, ok: !!info.guardRunning, run: toggleGuard, btn: 'Activer' },
+      { key: 'auto', label: 'Démarrage automatique', hint: 'Phone Master / Applis protégées', pts: 10, ok: !!confirmed.auto, run: () => openMsg(nat('openAutoStart')), btn: 'Ouvrir', manual: true },
+      { key: 'lock', label: 'Verrouillée dans les Récents', hint: 'Le réglage le plus efficace', pts: 10, ok: !!confirmed.lock, run: showLockSheet, btn: 'Voir comment', manual: true },
+      { key: 'clean', label: 'Nettoyage auto désactivé', hint: 'Phone Master → Nettoyage', pts: 5, ok: !!confirmed.clean, run: () => openMsg(nat('openBatterySettings')), btn: 'Ouvrir', manual: true }
+    ];
+  }
+
+  function renderItem(it) {
+    const btns = h('div', { class: 'btns' });
+    if (!it.ok) btns.appendChild(h('button', { class: 'btn small primary', onclick: it.run }, it.btn));
+    if (it.manual) {
+      btns.appendChild(h('button', {
+        class: 'btn small',
+        onclick: () => { confirmed[it.key] = !confirmed[it.key]; saveConfirmed(); refresh(true); }
+      }, it.ok ? 'Annuler ↩' : 'Fait ✓'));
+    }
+    return h('div', { class: 'item' },
+      h('div', { class: 'st' }, it.ok ? '✅' : '⚠️'),
+      h('div', { class: 'body' }, h('b', null, it.label), h('span', null, it.hint), btns.childNodes.length ? btns : null)
+    );
+  }
+
+  function diagText() {
+    return JSON.stringify(info, null, 1) + String.fromCharCode(10, 10) + LOG.join(String.fromCharCode(10));
+  }
+
+  function dashboard() {
+    const items = buildItems();
+    const total = items.reduce((s, it) => s + (it.ok ? it.pts : 0), 0);
+    const verdict = total >= 85 ? ['Excellente', 'ok'] : total >= 60 ? ['Correcte', 'mid'] : ['Faible', 'ko'];
+    const C = 2 * Math.PI * 52;
+    const off = (C * (1 - total / 100)).toFixed(1);
+
+    const ring = h('div', {
+      class: 'ring',
+      html: `<svg viewBox='0 0 120 120'><circle class='ring-bg' cx='60' cy='60' r='52'/><circle class='ring-fg ${verdict[1]}' cx='60' cy='60' r='52' stroke-dasharray='${C.toFixed(1)}' stroke-dashoffset='${off}' transform='rotate(-90 60 60)'/></svg>`
+    }, h('div', { class: 'ring-txt' }, h('b', null, total + '%'), h('span', null, verdict[0])));
+
+    const device = ((info.brand || info.manufacturer || '') + ' ' + (info.model || '')).trim() + ' · Android ' + (info.release || '?');
+
+    return h('div', null,
+      h('div', { class: 'top' }, h('div', null, h('h1', null, '🔋 Anti-Kill'), h('p', { class: 'sub' }, device))),
+
+      h('div', { class: 'card' },
+        h('div', { class: 'ring-wrap' }, ring,
+          h('div', { class: 'ring-info' },
+            h('b', null, 'Protection ' + verdict[0].toLowerCase()),
+            h('span', null, info.transsion ? 'Tecno / Infinix / Itel détecté.' : 'Marque non Transsion : les réglages peuvent avoir d’autres noms.'))),
+        h('button', { class: 'btn ' + (info.guardRunning ? 'danger' : 'primary'), onclick: toggleGuard },
+          info.guardRunning ? 'Désactiver la protection' : 'Activer la protection')
+      ),
+
+      h('div', { class: 'card' }, h('h2', null, 'Réglages'), items.map(renderItem)),
+
+      h('details', { class: 'card' }, h('summary', null, '💡 Conseils'),
+        h('p', null, 'Le verrouillage dans les Récents 🔒 est le réglage le plus efficace sur Tecno, Infinix et Itel. Fais-le pour chaque appli importante.'),
+        h('p', null, 'Cette appli ne peut pas désactiver le gestionnaire de batterie du constructeur, ni protéger les autres applis à ta place.'),
+        h('p', null, 'Certains modèles Itel restent très agressifs, même avec tout activé.')
+      ),
+
+      h('details', { class: 'card' }, h('summary', null, '🛠️ Diagnostic'),
+        h('p', null, 'En cas de problème, copie ce rapport et envoie-le moi.'),
+        h('div', { class: 'diag' }, diagText()),
+        h('button', { class: 'btn', onclick: () => { nat('copyText', diagText()); toast('Rapport copié ✅'); } }, 'Copier le rapport'),
+        h('button', { class: 'btn ghost', onclick: () => { onboarded = false; obStep = 0; LS.set('ak_onboarded', false); refresh(true); } }, 'Revoir le guide')
+      )
+    );
+  }
+
+  function noBridge() {
+    return h('div', null,
+      h('h1', null, '⚠️ Connexion Android indisponible'),
+      h('p', { class: 'sub' }, 'L’appli n’arrive pas à joindre les fonctions du téléphone. Ferme-la complètement et rouvre-la.'),
+      h('div', { class: 'card' }, h('div', { class: 'diag' }, diagText())),
+      h('button', { class: 'btn primary', onclick: () => location.reload() }, 'Réessayer')
+    );
+  }
+
+  // ---------- Rendu ----------
+  function render() {
+    root.innerHTML = '';
+    if (!bridgeOk) { root.appendChild(noBridge()); return; }
+    root.appendChild(onboarded ? dashboard() : onboarding());
+  }
+
+  function refresh(force) {
+    const i = nat('getInfo');
+    if (!i) return;
+    info = i;
+    const key = JSON.stringify(i) + '|' + JSON.stringify(confirmed) + '|' + onboarded + '|' + obStep;
+    if (!force && key === lastKey) return;
+    lastKey = key;
+    const s = OB[obStep];
+    if (!onboarded && waiting === obStep && s.check && s.check()) {
+      waiting = -1;
+      goNext();
+      return;
+    }
+    render();
+  }
+
+  window.onNativeEvent = () => refresh(false);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(false); });
+  setInterval(() => { if (bridgeOk && !document.hidden) refresh(false); }, 4000);
+
+  // ---------- Démarrage ----------
+  function start(tries) {
+    if (nativeObj()) { bridgeOk = true; refresh(true); return; }
+    if (tries < 25) { setTimeout(() => start(tries + 1), 120); return; }
+    log('Pont natif introuvable apres 3 s');
+    if (!sessionStorage.getItem('ak_reloaded')) {
+      sessionStorage.setItem('ak_reloaded', '1');
+      location.reload();
+      return;
+    }
+    bridgeOk = false;
+    render();
+  }
+
+  start(0);
 })();
