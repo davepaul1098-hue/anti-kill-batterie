@@ -1,0 +1,8 @@
+{
+  "appId": "com.paul.antikill",
+  "appName": "Anti-Kill Batterie",
+  "webDir": "www",
+  "server": {
+    "androidScheme": "https"
+  }
+}

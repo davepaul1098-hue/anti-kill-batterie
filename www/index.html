@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#0b0f14">
+<title>Anti-Kill Batterie</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="app">
+
+  <header>
+    <h1>🔋 Anti-Kill Batterie</h1>
+    <p class="sub">Garde tes applis en vie sur Tecno, Infinix et Itel</p>
+  </header>
+
+  <section class="card">
+    <div class="row"><span class="label">Téléphone</span><span id="deviceName">…</span></div>
+    <div class="row"><span class="label">Android</span><span id="androidVer">…</span></div>
+    <div class="row"><span class="label">Exemption batterie</span><span id="pillBattery" class="pill">…</span></div>
+    <div class="row"><span class="label">Protection</span><span id="pillGuard" class="pill">…</span></div>
+    <p class="msg" id="hint"></p>
+  </section>
+
+  <section class="card">
+    <h2>🛡️ Protection</h2>
+    <p class="dim">Une notification permanente indique à Android que l'appli travaille : c'est la méthode la plus efficace pour ne pas être tuée en arrière-plan.</p>
+    <button id="btnGuard" class="btn primary">Activer la protection</button>
+    <p class="msg" id="guardMsg"></p>
+  </section>
+
+  <section class="card">
+    <h2>✅ Checklist des réglages</h2>
+    <div class="bar"><i id="barFill"></i></div>
+    <p class="dim" id="progress"></p>
+    <ol class="steps" id="steps"></ol>
+  </section>
+
+  <section class="card">
+    <h2>⚠️ À savoir</h2>
+    <ul>
+      <li>Cette appli ne peut pas désactiver le gestionnaire de batterie du téléphone : elle t'amène aux bons réglages et se protège elle-même.</li>
+      <li>Elle ne peut pas protéger les autres applis à ta place : fais la checklist pour chacune (surtout le verrouillage dans les Récents 🔒).</li>
+      <li>Certains modèles Itel restent très agressifs, même avec tout activé.</li>
+    </ul>
+  </section>
+
+</main>
+<script src="script.js"></script>
+</body>
+</html>

@@ -1,0 +1,58 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Installer les dependances
+        run: npm install
+
+      - name: Generer le projet Android
+        run: npx cap add android
+
+      - name: Injecter le code natif
+        run: node scripts/inject-native.js
+
+      - name: Synchroniser Capacitor
+        run: npx cap sync android
+
+      - name: Compiler l APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - name: Renommer l APK
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk AntiKill.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AntiKill-apk
+          path: AntiKill.apk
+          retention-days: 90
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Anti-Kill Batterie build ${{ github.run_number }}
+          files: AntiKill.apk
+          make_latest: true

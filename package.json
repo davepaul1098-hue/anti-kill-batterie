@@ -1,0 +1,10 @@
+{
+  "name": "anti-kill-batterie",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "@capacitor/android": "^5.7.0",
+    "@capacitor/cli": "^5.7.0",
+    "@capacitor/core": "^5.7.0"
+  }
+}
